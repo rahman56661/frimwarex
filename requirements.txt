@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic>=2
+pyelftools
+pytest
+httpx
+# Aleena (angr stage) -- heavy, install in the analysis venv only:
+# angr

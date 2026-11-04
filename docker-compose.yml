@@ -1,0 +1,10 @@
+# Build the sandbox image:   docker compose --profile build build sandbox
+# Run the API on the host:   uvicorn app.main:app --reload     (it launches sandbox containers itself)
+services:
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: fwx-sandbox:latest
+    profiles: ["build"]
+    network_mode: none        # even if started by hand, no network

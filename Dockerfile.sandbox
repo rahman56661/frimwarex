@@ -1,0 +1,11 @@
+# Analysis sandbox image. Run ONLY via app/sandbox.py (egress denied, quotas, cap-drop).
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      binwalk squashfs-tools cpio mtd-utils unzip p7zip-full file \
+      qemu-user-static python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+# jefferson (JFFS2) / ubi_reader (UBIFS) extractors binwalk can call
+RUN pip3 install --no-cache-dir --break-system-packages jefferson ubi_reader || true
+RUN useradd -m analyst
+WORKDIR /tmp

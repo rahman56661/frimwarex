@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FirmwareX</title>
+<style>
+:root{--paper:#f6f7f5;--ink:#1b2220;--muted:#5d6a66;--line:#d6dcd8;--panel:#fff;--accent:#0f6b5c;
+--critical:#9b1c31;--high:#c2410c;--medium:#a16207;--low:#4d7c0f;--info:#52606d}
+@media (prefers-color-scheme:dark){:root{--paper:#14191a;--ink:#e6ebe8;--muted:#9aa8a3;--line:#2d3837;--panel:#1b2223;--accent:#4cc2ac}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.5 "Segoe UI",system-ui,sans-serif}
+header{padding:20px 28px;border-bottom:1px solid var(--line);display:flex;gap:24px;align-items:center;flex-wrap:wrap;background:var(--panel)}
+h1{font-size:20px;margin:0;font-weight:650;letter-spacing:-.01em}
+header p{margin:0;color:var(--muted)}
+main{padding:24px 28px;max-width:1280px;margin:auto}
+.drop{border:1.5px dashed var(--line);background:var(--panel);padding:22px;border-radius:6px;display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+button,.btn{background:var(--accent);color:#fff;border:0;padding:9px 16px;border-radius:5px;font:inherit;cursor:pointer}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,input:focus-visible,select:focus-visible,[role=tab]:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#status{margin:18px 0;color:var(--muted)}
+.stats{display:flex;gap:28px;flex-wrap:wrap;margin:8px 0 20px}
+.stats div b{display:block;font-size:22px;font-weight:650}
+.stats div span{color:var(--muted);font-size:13px}
+[role=tablist]{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:14px}
+[role=tab]{background:none;color:var(--muted);border-radius:0;padding:9px 14px;border-bottom:2px solid transparent}
+[role=tab][aria-selected=true]{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.tools{display:flex;gap:10px;margin-bottom:10px;flex-wrap:wrap}
+input,select{padding:7px 10px;border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:5px;font:inherit}
+.scroll{overflow:auto;max-height:62vh;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+table{border-collapse:collapse;width:100%}
+th,td{padding:7px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{position:sticky;top:0;background:var(--panel);font-weight:600;cursor:pointer;white-space:nowrap}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px;word-break:break-all}
+.yes{color:var(--low);font-weight:600}.no{color:var(--critical);font-weight:600}
+.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12.5px;color:#fff}
+.critical{background:var(--critical)}.high{background:var(--high)}.medium{background:var(--medium)}.low{background:var(--low)}.info{background:var(--info)}
+.empty{padding:28px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>FirmwareX</h1>
+  <p>Upload a public, open-source firmware image. It is unpacked and analysed in an isolated sandbox with no network.</p>
+</header>
+<main>
+  <div class="drop">
+    <input type="file" id="file" aria-label="Firmware image">
+    <button id="go">Analyse image</button>
+    <span id="hint" style="color:var(--muted)">Images only from firmware you are licensed to examine.</span>
+  </div>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div id="stats" class="stats"></div>
+  <div id="views" hidden>
+    <div role="tablist" id="tabs"></div>
+    <div id="panel"></div>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const API = "/api/v1";
+let fid = null, data = {files: [], audit: [], findings: [], log: []}, tab = "findings", sortKey = null, sortDir = 1;
+
+// Firmware content is untrusted: build DOM with textContent only, never innerHTML.
+function el(tag, props = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) { if (k === "class") n.className = v; else n[k] = v; }
+  for (const k of kids) n.append(k instanceof Node ? k : document.createTextNode(String(k ?? "")));
+  return n;
+}
+const yesno = v => el("span", {class: v ? "yes" : "no"}, v ? "yes" : "no");
+const risk = r => el("span", {class: "tag " + r}, r);
+const ORDER = {critical: 0, high: 1, medium: 2, low: 3, info: 4};
+
+$("#go").onclick = async () => {
+  const f = $("#file").files[0];
+  if (!f) { $("#status").textContent = "Choose a firmware image first."; return; }
+  $("#go").disabled = true; $("#views").hidden = true; $("#stats").replaceChildren();
+  $("#status").textContent = "Uploading " + f.name + "…";
+  const fd = new FormData(); fd.append("file", f);
+  const r = await fetch(API + "/firmware/upload", {method: "POST", body: fd});
+  if (!r.ok) { $("#status").textContent = "Upload failed: " + (await r.text()); $("#go").disabled = false; return; }
+  const j = await r.json(); fid = j.firmware_id;
+  poll(j.job_id);
+};
+
+async function poll(jobId) {
+  const j = await (await fetch(API + "/jobs/" + jobId)).json();
+  if (j.status === "running") { $("#status").textContent = "Analysing… stage: " + j.stage; return setTimeout(() => poll(jobId), 1500); }
+  $("#go").disabled = false;
+  if (j.status === "failed") { $("#status").textContent = "Analysis failed: " + (j.error || "unknown error"); return; }
+  $("#status").textContent = "Analysis complete.";
+  await load();
+}
+
+async function load() {
+  const [fs, au, vu, rp] = await Promise.all(["filesystem", "binary-audit", "vulnerabilities", "report"].map(p => fetch(`${API}/firmware/${fid}/${p}`).then(r => r.json())));
+  data = {files: fs.files, audit: au.binaries, findings: vu.findings, log: rp.audit_log, summary: rp.summary, chain: rp.audit_chain_valid};
+  const s = data.summary;
+  $("#stats").replaceChildren(...[["Files", s.files], ["ELF binaries", s.elfs], ["Findings", s.findings],
+    ["Run time", s.duration_s + " s"], ["Ran contained", s.contained ? "yes" : "NO (dev mode)"], ["Audit log intact", data.chain ? "yes" : "NO"]]
+    .map(([k, v]) => el("div", {}, el("b", {}, v), el("span", {}, k))));
+  $("#views").hidden = false; renderTabs(); render();
+}
+
+const TABS = [["findings", "Findings"], ["audit", "Mitigations"], ["files", "Files"], ["log", "Audit log"]];
+function renderTabs() {
+  $("#tabs").replaceChildren(...TABS.map(([k, label]) => {
+    const b = el("button", {role: "tab", type: "button"}, label);
+    b.setAttribute("aria-selected", k === tab); b.onclick = () => { tab = k; sortKey = null; renderTabs(); render(); };
+    return b;
+  }));
+}
+
+function table(cols, rows, filterFn) {
+  const q = (document.getElementById("q")?.value || "").toLowerCase();
+  let rs = rows.filter(r => !q || JSON.stringify(r).toLowerCase().includes(q)).filter(filterFn || (() => true));
+  if (sortKey) rs = [...rs].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : a[sortKey] < b[sortKey] ? -1 : 0) * sortDir);
+  if (!rs.length) return el("div", {class: "empty"}, "Nothing matches.");
+  const head = el("tr", {}, ...cols.map(c => { const th = el("th", {}, c.label); th.onclick = () => { sortDir = sortKey === c.key ? -sortDir : 1; sortKey = c.key; render(); }; return th; }));
+  const body = rs.slice(0, 1500).map(r => el("tr", {}, ...cols.map(c => el("td", {class: c.mono ? "mono" : ""}, c.cell ? c.cell(r) : r[c.key]))));
+  return el("div", {class: "scroll"}, el("table", {}, el("thead", {}, head), el("tbody", {}, ...body)));
+}
+
+function render() {
+  const keepQ = document.getElementById("q")?.value || "", keepR = document.getElementById("rf")?.value || "";
+  const tools = el("div", {class: "tools"}, el("input", {id: "q", type: "search", placeholder: "Filter", value: keepQ, oninput: render}));
+  let view;
+  if (tab === "findings") {
+    const sel = el("select", {id: "rf", onchange: render, "aria-label": "Risk"}, ...["", "critical", "high", "medium", "low", "info"].map(v => el("option", {value: v}, v || "All risks")));
+    sel.value = keepR; tools.append(sel);
+    const rows = data.findings.map(f => ({...f, _o: ORDER[f.risk_rating]})).sort((a, b) => a._o - b._o);
+    view = table([
+      {key: "risk_rating", label: "Risk", cell: r => risk(r.risk_rating)}, {key: "cwe", label: "CWE"},
+      {key: "binary", label: "Binary", mono: true}, {key: "sink", label: "Sink", mono: true},
+      {key: "confidence", label: "Confidence"}, {key: "description", label: "Detail"},
+      {key: "evidence_ref", label: "Evidence (redacted)", mono: true}], rows, r => !keepR || r.risk_rating === keepR);
+  } else if (tab === "audit") {
+    view = table([{key: "path", label: "Binary", mono: true}, {key: "architecture", label: "Arch"}, {key: "endianness", label: "Endian"},
+      {key: "nx", label: "NX", cell: r => yesno(r.nx)}, {key: "pie", label: "PIE", cell: r => yesno(r.pie)},
+      {key: "relro", label: "RELRO"}, {key: "stack_canary", label: "Canary", cell: r => yesno(r.stack_canary)},
+      {key: "fortify", label: "Fortify", cell: r => yesno(r.fortify)}, {key: "stripped", label: "Stripped", cell: r => yesno(r.stripped)}], data.audit);
+  } else if (tab === "files") {
+    view = table([{key: "path", label: "Path", mono: true}, {key: "type", label: "Type"}, {key: "size", label: "Size"}, {key: "sha256", label: "SHA-256", mono: true}], data.files);
+  } else {
+    view = table([{key: "ts", label: "Time"}, {key: "event", label: "Event"}, {key: "detail", label: "Detail", mono: true}], data.log);
+  }
+  $("#panel").replaceChildren(tools, view);
+  const q = document.getElementById("q"); if (q === document.activeElement || keepQ) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
+}
+</script>
+</body>
+</html>
