@@ -5,5 +5,5 @@ pydantic>=2
 pyelftools
 pytest
 httpx
-# Aleena (angr stage) -- heavy, install in the analysis venv only:
-# angr
+# angr stage (heavy install; if import fails with a protobuf error: pip install -U protobuf)
+angr

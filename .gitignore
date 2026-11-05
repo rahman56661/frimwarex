@@ -2,5 +2,3 @@ data/
 __pycache__/
 *.pyc
 .venv/
-testfw/
-testfw.tar
