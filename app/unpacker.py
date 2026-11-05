@@ -44,6 +44,58 @@ def _safe_extract_tar(path: str, dest: str) -> bool:
         return False
 
 
+SQUASH_MAGICS = (b"hsqs", b"sqsh", b"shsq", b"qshs")      # std LE/BE + non-standard LE/BE (old Broadcom/DVRF)
+
+
+def _squashfs_offsets(path: str, limit: int = 8) -> List[int]:
+    import mmap
+    offs: List[int] = []
+    with open(path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+        for magic in SQUASH_MAGICS:
+            i = mm.find(magic)
+            while i != -1 and len(offs) < limit * 4:
+                offs.append(i)
+                i = mm.find(magic, i + 1)
+    return sorted(set(offs))[:limit]
+
+
+def _carve(src: str, dst: str, offset: int) -> None:
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        fi.seek(offset)
+        shutil.copyfileobj(fi, fo, 1 << 20)
+
+
+def _sasquatch_fallback(firmware_path: str, out: str, timeout: int, log: List[str]):
+    """Carve SquashFS at magic offsets and extract with sasquatch (handles v3 / non-standard / LZMA variants)."""
+    if sandbox.MODE == "local" and not shutil.which("sasquatch"):
+        log.append("sasquatch not installed")
+        return None, True
+    contained = True
+    for off in _squashfs_offsets(firmware_path):
+        carved = os.path.join(out, f"carve_{off:x}.squashfs")
+        _carve(firmware_path, carved, off)
+        for endian in ("-le", "-be"):
+            dest_name = f"sasquatch-{off:x}{endian}"
+            dest = os.path.join(out, dest_name)
+            if sandbox.MODE == "local":
+                cmd, mounts = ["sasquatch", "-p", "1", endian, "-d", dest, carved], []
+            else:
+                cmd = ["sasquatch", "-p", "1", endian, "-d", f"/out/{dest_name}", f"/out/{os.path.basename(carved)}"]
+                mounts = [(out, "/out", "rw")]
+            try:
+                r = sandbox.run(cmd, mounts, timeout=timeout)
+            except sandbox.SandboxTimeout:
+                log.append(f"sasquatch {endian}@{off:#x}: timeout")
+                continue
+            contained = contained and r.contained
+            log.append(f"sasquatch {endian}@{off:#x} rc={r.returncode}")
+            root = find_rootfs(dest) if os.path.isdir(dest) else None
+            if root:
+                return root, contained
+        os.remove(carved) if os.path.exists(carved) else None
+    return None, contained
+
+
 def unpack(firmware_path: str, work_dir: str, timeout: int = 600) -> Dict:
     """Returns {rootfs, method, contained, log}. Raises RuntimeError if nothing could be extracted."""
     out = os.path.join(work_dir, "extract")
@@ -82,6 +134,11 @@ def unpack(firmware_path: str, work_dir: str, timeout: int = 600) -> Dict:
         log.append(f"unsquashfs rc={r.returncode}")
         rootfs = find_rootfs(out)
         method = "unsquashfs" if rootfs else method
+
+    if not rootfs:
+        rootfs, c = _sasquatch_fallback(firmware_path, out, timeout, log)
+        contained = contained and c
+        method = "sasquatch" if rootfs else method
 
     if not rootfs and _safe_extract_tar(firmware_path, os.path.join(out, "tar")):
         log.append("tar fallback")

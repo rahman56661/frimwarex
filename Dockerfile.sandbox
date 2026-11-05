@@ -7,5 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # jefferson (JFFS2) / ubi_reader (UBIFS) extractors binwalk can call
 RUN pip3 install --no-cache-dir --break-system-packages jefferson ubi_reader || true
+# sasquatch: patched unsquashfs for non-standard / old (v3, LZMA) SquashFS used by many routers (e.g. DVRF)
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential git ca-certificates \
+      zlib1g-dev liblzma-dev liblzo2-dev liblz4-dev libzstd-dev \
+ && git clone --depth 1 https://github.com/onekey-sec/sasquatch /tmp/sasquatch \
+ && make -C /tmp/sasquatch/squashfs-tools -j4 sasquatch \
+ && install -m 0755 /tmp/sasquatch/squashfs-tools/sasquatch /usr/local/bin/sasquatch \
+ && rm -rf /tmp/sasquatch /var/lib/apt/lists/*
 RUN useradd -m analyst
 WORKDIR /tmp

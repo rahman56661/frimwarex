@@ -101,3 +101,44 @@ def test_end_to_end_api(tmp_path):
     assert "hardcoded_secret" in cats
     assert c.get(f"/api/v1/firmware/{fid}/vulnerabilities?category=hardcoded_secret").json()["count"] >= 2
     assert c.get("/api/v1/firmware/nope").status_code == 404
+
+
+# ---- scanner patterns (added by Aleena's task) -------------------------------------------------
+GOOGLE = b"AIzaSyA1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q"
+SLACK = b"xoxb-" + b"123456789012-" + b"abcdefghijklmnop"  # built at runtime so it never appears as a literal token in source/diffs
+JWT = b"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+TOKEN = b"q8Zk3Vn7Lp2Xw9Rt5Yb1Hc6Jd4Fm0Sg8Ua3Ne7Kx"
+
+
+@pytest.mark.parametrize("blob,label", [
+    (b"key=" + GOOGLE, "google_api_key"),
+    (b"slack " + SLACK, "slack_token"),
+    (b"auth " + JWT, "jwt"),
+    (b"login admin:admin now", "default_credentials"),
+    (b"blob " + TOKEN, "high_entropy_string"),
+])
+def test_new_patterns_detect_and_redact(blob, label):
+    fs = scan_data(blob + b"\x00", "/etc/x", "fw")
+    labels = {f.evidence_ref.split(":")[0] for f in fs}
+    assert label in labels
+    dumped = json.dumps([f.model_dump(mode="json") for f in fs])
+    for raw in (GOOGLE, SLACK, JWT, TOKEN, b"admin:admin"):
+        if raw in blob:
+            assert raw.decode() not in dumped            # raw value never in output
+    assert all(f.redacted for f in fs if f.category == Category.HARDCODED_SECRET)
+
+
+def test_lookup_tables_not_flagged_as_entropy_tokens():
+    b64_table = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\x00"
+    assert [f for f in scan_data(b64_table, "/bin/x", "fw") if f.evidence_ref.startswith("high_entropy")] == []
+
+
+def test_entropy_scan_skipped_for_elf_binaries(tmp_path):
+    import shutil as _sh
+    from app.secrets_scan import is_elf_bytes, scan_rootfs
+    root = tmp_path / "rootfs" / "bin"
+    root.mkdir(parents=True)
+    _sh.copy("/bin/ls", root / "ls")
+    assert is_elf_bytes((root / "ls").read_bytes())
+    fs = scan_rootfs(str(tmp_path / "rootfs"), "fw")
+    assert [f for f in fs if f.evidence_ref.startswith("high_entropy")] == []

@@ -61,8 +61,27 @@ def run_pipeline(fid: str, fw_path: str, job_id: str) -> None:
         findings += find_sink_leads(audits, fid)
         _stage(job_id, fid, "leads", stages, t0, count=len(findings))
 
-        # 4. TODO(Aleena): angr taint on top-N service binaries, bounded by budgets
-        #    from .taint_angr import analyse_binary ; add results to `findings`
+        # 4. angr sink-reachability on the top network-facing binaries (budgeted, child process)
+        angr_info = {"enabled": False}
+        if os.environ.get("FWX_ANGR", "1") == "1":
+            from . import taint_angr
+            from .sinks import SERVICE_HINTS
+            if taint_angr.available():
+                targets = [a for a in audits if not a.is_shared_object and any(h in a.path.lower() for h in SERVICE_HINTS)]
+                targets = targets[: int(os.environ.get("FWX_ANGR_MAX_BINARIES", "5"))]
+                got, incomplete = [], []
+                for a in targets:
+                    fs, ok, note = taint_angr.analyse_binary(os.path.join(rootfs, a.path.lstrip("/")), a.path, fid, a.architecture)
+                    got += fs
+                    if not ok:
+                        incomplete.append({"binary": a.path, "reason": note})
+                keys = {(f.binary, f.sink) for f in got}            # angr result supersedes the heuristic lead
+                findings = [f for f in findings if not (f.evidence_ref.startswith("import:") and (f.binary, f.sink) in keys)]
+                findings += got
+                angr_info = {"enabled": True, "binaries": len(targets), "findings": len(got), "incomplete": incomplete}
+            else:
+                angr_info = {"enabled": False, "reason": "angr not installed"}
+        _stage(job_id, fid, "taint", stages, t0, **angr_info)
 
         # 5. secrets + weak crypto (redacted)
         arch_by_path = {a.path: a.architecture for a in audits}
