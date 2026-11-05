@@ -88,7 +88,9 @@ def _sasquatch_fallback(firmware_path: str, out: str, timeout: int, log: List[st
                 log.append(f"sasquatch {endian}@{off:#x}: timeout")
                 continue
             contained = contained and r.contained
-            log.append(f"sasquatch {endian}@{off:#x} rc={r.returncode}")
+            err_tail = (r.stderr or r.stdout or "").strip().splitlines()
+            err_tail = " | ".join(err_tail[-2:]) if err_tail else ""
+            log.append(f"sasquatch {endian}@{off:#x} rc={r.returncode}" + (f" :: {err_tail[:200]}" if r.returncode else ""))
             root = find_rootfs(dest) if os.path.isdir(dest) else None
             if root:
                 return root, contained
@@ -101,6 +103,13 @@ def unpack(firmware_path: str, work_dir: str, timeout: int = 600) -> Dict:
     out = os.path.join(work_dir, "extract")
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out, exist_ok=True)
+    if sandbox.MODE != "local":
+        # The sandbox container drops ALL capabilities (SC-1.3), including CAP_DAC_OVERRIDE, so its
+        # root user can no longer bypass Unix permission checks the way an uncontained root normally
+        # would. Without this, the container gets "Permission denied" creating anything under the
+        # bind-mounted work directory, since that directory is owned by the host user, not root.
+        # World-writable is fine here: this is a short-lived, per-job scratch directory, not a secret.
+        os.chmod(out, 0o777)
     in_dir, in_name = os.path.dirname(os.path.abspath(firmware_path)), os.path.basename(firmware_path)
     log: List[str] = []
     contained = True
@@ -116,7 +125,8 @@ def unpack(firmware_path: str, work_dir: str, timeout: int = 600) -> Dict:
     try:
         r = sandbox.run(binwalk_cmd, mounts, timeout=timeout)
         contained = contained and r.contained
-        log.append(f"binwalk rc={r.returncode}")
+        tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
+        log.append(f"binwalk rc={r.returncode}" + (f" :: {tail[:200]}" if r.returncode else ""))
         rootfs = find_rootfs(out)
         if rootfs:
             method = "binwalk"
@@ -131,7 +141,8 @@ def unpack(firmware_path: str, work_dir: str, timeout: int = 600) -> Dict:
              firmware_path if sandbox.MODE == "local" else f"/in/{in_name}"],
             mounts, timeout=timeout)
         contained = contained and r.contained
-        log.append(f"unsquashfs rc={r.returncode}")
+        tail = " | ".join((r.stderr or "").strip().splitlines()[-2:])
+        log.append(f"unsquashfs rc={r.returncode}" + (f" :: {tail[:200]}" if r.returncode else ""))
         rootfs = find_rootfs(out)
         method = "unsquashfs" if rootfs else method
 
